@@ -1,0 +1,23 @@
+# LLM 配置 (Spec §6 Runtime / §9.3 可复现边界)
+# 凭据从环境变量读取 (见 .env), 不在此硬编码。
+
+provider: openai_compatible
+base_url_env: OPENAI_BASE_URL        # https://api.huiyan-ai.cn/v1
+api_key_env: OPENAI_API_KEY
+model_env: AGENT_MODEL
+
+default_model: gpt-5.5               # 推理模型; 冒烟测试已通过 (finish_reason=tool_calls, temperature=0 可用)
+fallback_models: [gpt-4.1, gpt-4o]  # 代理可用 (共 224 模型, 含 gpt-5.1~5.5 / o 系列)
+
+tool_calling:
+  verified: true                     # 2026-06-24 gpt-5.5 通过代理实测: 正确返回 tool_calls
+  mode: native_function_calling      # §6.2: 原生 function calling, 不解析自由文本
+  tool_choice: auto
+
+# §9.3 每次运行必须记录:
+run_logging:
+  fields: [provider, model_id, system_prompt_hash, tool_list_version, token_usage, structured_output]
+
+determinism:
+  temperature: 0                     # 科学决策尽量稳定; 但 §9.3 不承诺 bit-level 可复现
+  note: "在线 LLM 不保证可复现; 科学工具在固定种子下可复现 (见 science_config.yaml)"

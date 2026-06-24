@@ -1,0 +1,144 @@
+# 数据清单 / Data Manifest  —  M0 固定记录
+# 对应 Spec §3.1（开发前必须固定的项）。本文件一旦确认即视为版本化锁定。
+
+source:
+  repo: csuhwq0421/ML4Dendrites
+  url: https://github.com/csuhwq0421/ML4Dendrites
+  commit_sha: f677ae463af9271acea0d5c0cf595f7d3560baab   # main HEAD @ 2026-06-24
+  paper: >-
+    Machine intelligence supports the full chain of material synthesis:
+    A case study on chemical vapor deposition growth of 2D ReSe2 dendrites
+  local_vendor_path: vendor/ML4Dendrites
+
+license:
+  status: CONFLICT_NEEDS_RESOLUTION       # ⚠ 须与作者/同组确认
+  license_file: Apache-2.0                 # 仓库内 LICENSE 文件实际内容
+  readme_states: MIT                       # README 文末声明
+  note: >-
+    LICENSE 文件是 Apache-2.0，但 README 写 MIT。两者均为宽松许可，研究复现与引用均可；
+    本项目暂按更明确的 LICENSE 文件(Apache-2.0)记录，并在论文/复现说明中注明此冲突。
+
+# ---- 输入/输出变量（Spec §3.1）----
+variables:                                 # 单位/步长来源: SI Table S3; 范围确定见 SI Table S1/S2(grow-or-not 实验)
+  x1: { name: T_Re,  desc: "Re 源温度",   unit: "°C",    step: 10, range: [580, 680], observed_range: [580, 680] }
+  x2: { name: T_Se,  desc: "Se 源温度",   unit: "°C",    step: 10, range: [220, 300], observed_range: [220, 300] }
+  x3: { name: c_Re,  desc: "Re 源浓度",   unit: "mol/L", range: [0.025, 0.15], observed_range: [0.025, 0.15] }  # 数据值=mol/L 直存
+  x4:
+    name: f_H2
+    desc: "H2 流量"
+    unit: "sccm"
+    range_sccm: [1, 4]
+    step_sccm: 1
+    data_scaling: "data_value × 100 = sccm"   # ⚠ 数据列 x4∈{0.01..0.04} ↔ {1..4} sccm; 显示层须×100
+    observed_range_raw: [0.01, 0.04]
+  x5:
+    name: substrate
+    desc: "衬底类别"
+    encoding: binary_0_1                   # 数据中已是 0/1；one-hot 即单列，天然满足 §3.1 类别约束
+    categories: { 1: "c-Al2O3", 0: "MgO" }   # ✅ 由 SI Table S4 数据点交叉验证 (1=c-Al2O3, 0=MgO)
+  y1:
+    name: D_F
+    desc: "分形维数 (linear fractal dimension of dendrite edges)"
+    unit: dimensionless
+    physical_range: [1.0, 2.0]             # Spec §7.4; SI: DF∈(1,2), 1=光滑闭曲线, →2=近似面
+    observed_range: [1.16, 1.73]
+    extrapolation_cap: 1.73                # 高于此值的预测须标记为外推 (§7.4)
+    box_counting_definition:               # ✅ SI Fig. S1 + 正文方法
+      method: "ImageJ 'Fractal Box Count' 插件; 对畴边轮廓"
+      box_sizes: [2, 4, 8, 16]             # 像素
+      formula: "DF = slope of linear regression: log(N) vs log(1/box_size)"
+      reference: "Falconer, Fractal Geometry, 2nd ed., 2003, pp.59-75 [SI ref 11]"
+
+# ---- Sheet ↔ 实验阶段映射（Spec §3.1）----
+phases:
+  process_optimization:                    # 阶段1：主动学习寻高 D_F (60 实验 / 4 迭代)
+    dir: "1-Process optimization"
+    data_file: "Dataset_bayesian.xlsx"
+    notebooks: ["Bayesian process.ipynb", "gpr-shap.ipynb"]
+    replay_rounds:                         # 已验证 round(N+1) = round(N) + sug-r(N+1)
+      - { sheet: initial, n: 20, best_DF: 1.62 }
+      - { sheet: round1,  n: 30, best_DF: 1.62, added_from: sug-r1, delta_best: 0.00 }  # 停滞
+      - { sheet: round2,  n: 40, best_DF: 1.67, added_from: sug-r2, delta_best: 0.05 }
+      - { sheet: round3,  n: 50, best_DF: 1.67, added_from: sug-r3, delta_best: 0.00 }  # 停滞
+      - { sheet: round4,  n: 60, best_DF: 1.73, added_from: sug-r4, delta_best: 0.06 }
+    hidden_pools:                          # 每个 checkpoint 的隐藏候选池(真实点+真值)
+      - { at_round: initial, pool_sheet: sug-r1, n: 10, cand_DF_max: 1.59 }  # < 当前best → 该批无法突破
+      - { at_round: round1,  pool_sheet: sug-r2, n: 10, cand_DF_max: 1.67 }
+      - { at_round: round2,  pool_sheet: sug-r3, n: 10, cand_DF_max: 1.62 }
+      - { at_round: round3,  pool_sheet: sug-r4, n: 10, cand_DF_max: 1.73 }
+    acquisition_record: "Next_round_suggestion.xlsx"   # 含 y_pred_new, y_uncer_new, acq_produc(MES采集值)
+    open_issues:
+      - "round4 sheet 有 13 列/63 数据行且 best=1.73，而 bayes-01 为 60 行 best=1.71；须确认 60-实验规范集是哪个 sheet"
+
+  customized_synthesis:                    # 阶段2：XGBoost + 差异(PA)引导扩点 (+9 实验)
+    dir: "2-Customized synthesis"
+    data_files: ["Initial_data2.xlsx", "Total_data.xlsx"]
+    notebooks: ["Model_evaluation.ipynb", "data expansion.ipynb"]
+    expansion_rounds:
+      - { sheet: "Initial_data2:Bayes", n: 60 }
+      - { sheet: "Initial_data2:r1",    n: 63 }   # +3
+      - { sheet: "Initial_data2:r2",    n: 66 }   # +3
+      - { sheet: "Initial_data2:r3",    n: 69 }   # +3  (= +9 total, 对应论文)
+    open_issues:
+      - "Total_data.xlsx Sheet1 有 75 数据行，而扩点序列止于 69；多出 ~6 点来源待查(data expansion.ipynb)"
+
+  mechanism_deciphering:                   # 阶段3：SHAP + 交互(I score)
+    dir: "3-Mechanism deciphering"
+    data_file: "Total_data.xlsx"           # sheets: Bayes(60), Sheet2(69)
+    notebooks: ["xgb-exp.ipynb"]
+    final_model: "xgb-final.pkl"
+
+# ---- notebook 审计结论(已完成)。规范化配置见 configs/science_config.yaml ----
+science_definitions:                       # Spec §3.1 要求固定原始定义
+  PA_score:
+    full_name: "Prediction Accuracy score"   # ✅ 正文 Fig.2 'Prediction accuracy (PA)-guided'
+    definition: "逐点 CV 均方误差 (pointwise CV-MSE)"
+    method: "5×5 重复 KFold(shuffle, random_state=j), 每点累加 (y-ŷ)² 再÷重复数; 降序排, 高分=难预测=扩点目标"
+    source: "2-Customized synthesis/data expansion.ipynb; 值见 SI Table S4 (列: Exp.|Mean pred.|PA score)"
+    augmentation_rule:                       # ✅ SI 已补全(原 notebook 缺): 每轮取 top PA 点, 在其'邻域'各加 1 实验
+      pick: "top-3 PA 点 (后续轮次因点相近合并, 见 SI Table S8/S9)"
+      vicinity: "ΔT_Re < 5% (最重要特征); 其余特征变化 < 2 个网格步长"
+  MES:
+    definition: "Max-value Entropy Search (emukit) + IntegratedHyperParameterAcquisition (MCMC 边缘化 GP 超参)"
+    batch: "batch_size=15, LocalPenalization 去重 + 落离散网格 ≈ 10 接受"
+    acq_produc: "每候选的积分 MES 采集值 (越高越信息量大)"
+    source: "1-Process optimization/Bayesian process.ipynb"
+  I_score:
+    definition: "特征独立性指标 = 主效应 / 交互效应 之比 (正文 Eq.2)"   # ✅ SI: ratio of main effect to interaction effect
+    interpretation: "高 I = 贡献独立(不依赖其他变量, 如 T_Re/sub.); 低 I = 强耦合(如 T_Se/f_H2)"
+    main_effect: "特征 x_i 与自身的 SHAP 交互值 (单独作用贡献)"
+    interaction_effect: "x_i 与其他特征 x_j 的 SHAP 交互值 (协同贡献, i≠j)"
+    variants:
+      main_text: "正文 Fig.2e: 基于 XGBoost 经典 SHAP interaction values"
+      supplementary: "SI Fig.S4/S20: 基于 GPR + shapiq SII (max_order=2, 精确 budget=2^5=32)"
+    library: "shapiq 1.3.1 (GPR 变体); shap TreeExplainer (XGBoost 变体)"
+    source: "xgb-exp.ipynb (XGBoost) + gpr-shap.ipynb (GPR/shapiq)"
+  cv_config:
+    scheme: "重复 KFold (手写循环, 非 RepeatedKFold)"
+    repeats: 5
+    folds: 5
+    shuffle: true
+    random_state: "每重复 i = 0..repeats-1 (可复现)"
+    no_holdout: "无独立测试集; 'Test'=各折留出拼接"
+    note: "xgb-exp 部分用 10×10"
+  leakage_audit:
+    verdict: "原 notebook 为论文复现脚本(全量 fit+解释), 非逐 checkpoint 防泄漏"
+    scaling: "min-max 为域边界(非数据驱动) → 不泄漏"
+    must_reimplement: "§7.1 要求每 checkpoint 仅用当前可见数据重新 fit; 不可直接复用 notebook 的全量 fit"
+    by_design_not_leak: "PA 扩点用 y1/CV误差选点 = AL 设计, 非经典泄漏"
+    interp_caveat: "SHAP/SHAPIQ 在全量数据上 fit+解释(解释场景可接受)"
+  xgb_final_pkl:
+    status: NOT_REPRODUCIBLE
+    note: "200 棵树, 与所有 notebook(n_estimators=240)不符; 配置无法从 pkl 还原(版本不兼容)"
+
+# ---- M0 缺口状态 ----
+resolved_from_paper:                       # ✅ 由 manuscript/SI 补全 (2026-06-24)
+  - "D_F box-counting 定义/单位 (§7.4): SI Fig.S1 — ImageJ Fractal Box Count, box 2/4/8/16, slope log-log"
+  - "substrate 映射: 1=c-Al2O3, 0=MgO (SI Table S4 交叉验证)"
+  - "各变量单位: T_Re/T_Se=°C(步10), c_Re=mol/L, f_H2=sccm(数据×100)"
+  - "PA 扩点'邻域'规则: ΔT_Re<5%, 其余<2 网格步 (SI Table S5/S9)"
+  - "I score = 主效应/交互效应 比 (正文 Eq.2)"
+needs_from_PI:                             # 仍待确认 (均不挡 M1)
+  - "data_new.xlsx 缺失 → Total_data(75 行)装配不可复现; 确认阶段2是否仅用 60→69 可复现序列(+8验证点单列)"
+  - "license 冲突(Apache 文件 vs MIT README)是否需向作者澄清"
+  - "science_config.yaml 漂移项 ratify (XGB reg_lambda=10/colsample=0.6 等)"

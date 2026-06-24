@@ -1,0 +1,98 @@
+# 规范科学配置（版本化锁定）  —  Spec §6.5「所有科学配置固定在版本化配置文件中」/ §7.1 防泄漏
+#
+# ⚠ 状态：PROPOSED（草案，待 PI 确认）。原 notebook 存在配置漂移，此处为每模型选定单一规范值。
+# 选取原则：优先采用「最终模型血缘」(xgb-exp/SHAP) 与「模型对比 notebook」(Model_evaluation) 的值。
+# 关键约束(§7.1)：每个 checkpoint 的模型只用当前可见数据 fit；以下配置为「固定不可调」，
+#                  仅 GPR kernel 参数在当前可见数据上优化。
+
+seed: 0                       # 全局基础随机种子
+
+# ---- 重复交叉验证（§7.2 必须给均值+波动；差异<波动→"统计上无法区分"）----
+cross_validation:
+  scheme: repeated_kfold
+  folds: 5
+  repeats: 5
+  shuffle: true
+  random_state_per_repeat: [0, 1, 2, 3, 4]
+  metrics: [r2, rmse, mae]
+  report: {central: mean, spread: std}    # 不得仅按平均 R² 排序
+
+# ---- 三个对比模型（§7.2）----
+models:
+  GPR:                        # 用于 compare_models（模型对比血缘 = Model_evaluation.ipynb）
+    impl: sklearn.GaussianProcessRegressor
+    kernel: "Matern(nu=1.5, length_scale=1.0)"   # 各向同性
+    alpha: 0.05
+    normalize_y: true
+    n_restarts_optimizer: 20                       # 最终单次 fit / 采集函数代理用
+    cv_n_restarts_optimizer: 2                     # compare_models 重复CV 用(交互响应度; 见 B9)
+    fit_scope: visible_only                       # §7.1: 仅当前可见数据；kernel 参数在此拟合
+  ExtraTrees:
+    impl: sklearn.ExtraTreesRegressor
+    params: {n_estimators: 500, max_depth: 5, min_samples_split: 3, min_samples_leaf: 1, random_state: 1}
+  XGBoost:                    # 规范取「最终模型血缘」(xgb-exp.ipynb / data expansion.ipynb)
+    impl: xgboost.XGBRegressor
+    params:
+      max_depth: 5
+      learning_rate: 0.10
+      n_estimators: 240
+      reg_lambda: 10          # 漂移项: Model_evaluation 全量run 用 5；此处取 final 血缘的 10
+      reg_alpha: 0            # 漂移项: 备选 0.01
+      min_child_weight: 3
+      subsample: 0.8
+      colsample_bytree: 0.6   # 漂移项: 备选 0.5
+      random_state: 0
+
+# ---- BO 代理模型（用于 suggest_next_batch 的 GPR+MES baseline，血缘=Bayesian process.ipynb）----
+bo_surrogate:
+  impl: GPy.GPRegression
+  kernel: "Matern32(input_dim=5, ARD=True)"
+  lengthscale_bounds: [0.1, 10]
+  variance_bounds: [1, 1000]
+  gaussian_noise_variance: 0.0025        # σ=0.05, fixed
+  optimize_restarts: 20
+  fit_target: "-Y (emukit 最小化)"
+  acquisition:
+    type: MaxValueEntropySearch
+    wrapper: IntegratedHyperParameterAcquisition
+    batch_size: 15
+    batch_method: LocalPenalization
+    snap_to_grid: true                   # 落到离散参数网格再去重
+
+# ---- 预处理（§7.1 缩放须域边界、非数据驱动）----
+preprocessing:
+  scaling: minmax_domain_bounds          # 用参数空间边界，不用数据统计 → 不泄漏
+  feature_ranges:                        # 域边界（来自 notebook custom_normalize; 单位见 data_manifest）
+    x1: [580, 680]    # T_Re  °C  (step 10)
+    x2: [220, 300]    # T_Se  °C  (step 10)
+    x3: [0.025, 0.15] # c_Re  mol/L
+    x4: [0.01, 0.04]  # f_H2  raw (×100 = sccm, 范围 1-4 sccm)
+    x5: [0, 1]        # substrate
+  substrate_encoding: raw_binary_0_1     # = one-hot drop-first；不插值（§3.1）。1=c-Al2O3, 0=MgO
+  display_units: { x4: "value*100 sccm" }  # 前端显示层换算
+  tree_models_scaling: none              # 树模型尺度不变, 不缩放
+
+# ---- 解释器 ----
+explainers:
+  SHAP_tree:   {explainer: TreeExplainer, target: XGBoost, background: tree_path_default}
+  I_score:                               # 独立性 = 主效应/交互效应 比 (正文 Eq.2)
+    definition: "main_effect / interaction_effect (per feature)"
+    main_text_variant: {source: XGBoost_SHAP_interaction}     # Fig.2e
+    supplementary_variant: {library: shapiq, index: SII, max_order: 2, budget: 32, target: GPR}  # Fig.S4/S20
+  note: "解释器在当前可见数据上 fit+解释；样本/稳定性不足时不出确定性结论(§5.2)"
+
+# ---- 隐藏池 / suggest_next_batch（决策 #4 = B，已由 PI 确认）----
+hidden_pool:
+  candidate_scope: all_remaining_hidden  # B: 所有未揭示真实点(sug-r(N+1..4)之并)，随揭示递减
+  reveal: append_true_DF                 # 揭示=并入下一轮(已验证 round(N+1)=round(N)+sug)
+  no_action_when_no_match: true          # §4.3: 想要区域池中无点→弃权
+  eval_caveat: "隐藏点本身由原 GPR+MES 选出, 天然偏向其偏好区域 → 池内对比对 Agent 略不利(§3.3/§10 须声明)"
+
+# ---- D_F 校验（§7.4）----
+DF_validation:
+  physical_range: [1.0, 2.0]
+  extrapolation_cap: 1.73                # 高于观测上限→标记外推
+  box_counting_definition:               # ✅ SI Fig.S1: ImageJ Fractal Box Count, box 2/4/8/16, slope log(N) vs log(1/box)
+    tool: "ImageJ Fractal Box Count plugin"
+    box_sizes_px: [2, 4, 8, 16]
+    formula: "DF = slope( log(N) vs log(1/box_size) )"

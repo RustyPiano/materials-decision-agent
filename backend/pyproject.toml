@@ -1,0 +1,26 @@
+[project]
+name = "materials-decision-agent-backend"
+version = "0.1.0"
+description = "ReSe2 枝晶实验决策 Agent 后端 (FastAPI + LangGraph)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "scipy>=1.12",
+    "scikit-learn>=1.5",
+    "xgboost>=2.1",
+    "langgraph>=0.2.50",
+    "langchain-openai>=0.2",
+    "langchain-core>=0.3",
+    "sse-starlette>=2.1",
+]
+
+[tool.uv]
+package = false

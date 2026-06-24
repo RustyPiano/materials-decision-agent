@@ -1,0 +1,28 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# node / frontend
+node_modules/
+dist/
+.vite/
+
+# data/model artifacts (派生物, 由 ETL 从 vendor/ 重建)
+data/processed/
+*.sqlite
+*.db
+artifacts/
+
+# vendor 原始仓库与文章 (体积大/版权; 用 SHA 固定, 不入库)
+vendor/
+
+# os
+.DS_Store
