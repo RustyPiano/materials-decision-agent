@@ -41,6 +41,26 @@ export interface CompareResult {
   oof: Record<string, { true: (number | null)[]; pred: (number | null)[] }>;
 }
 
+export interface ShapFeature {
+  feature: string;
+  importance: number; importance_std: number;
+  main_effect: number; interaction_effect: number;
+  i_score: number | null;
+}
+export interface ExplainResult {
+  model: string; n: number;
+  features: ShapFeature[];
+  i_score_reliable: boolean; i_score_note: string; note: string;
+}
+export interface BlindspotPoint {
+  x1: number; x2: number; x3: number; x4: number; x5: number;
+  y1: number; pa_score: number;
+}
+export interface BlindspotResult {
+  checkpoint: number; n: number; metric: string;
+  points: BlindspotPoint[]; top_blindspots: BlindspotPoint[]; note: string;
+}
+
 export interface DecisionCard {
   status: string;
   evidence: string[];
@@ -87,6 +107,12 @@ export async function seek(checkpoint: number): Promise<CampaignState> {
 }
 export async function compareModels(): Promise<CompareResult> {
   return req("/api/models/compare");
+}
+export async function explainModel(): Promise<ExplainResult> {
+  return req("/api/models/explain");
+}
+export async function blindspots(): Promise<BlindspotResult> {
+  return req("/api/models/blindspots");
 }
 export async function runAgent(user_goal: string): Promise<{ run_id: string; checkpoint: number }> {
   return req("/api/agent/run", { method: "POST", headers: J, body: JSON.stringify({ user_goal }) });

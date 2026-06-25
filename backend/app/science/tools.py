@@ -14,13 +14,14 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from app.config import FEATURES
+from app.config import FEATURES, science_config
 from app.data import campaign as C
 from app.science import models as M
 
 # D_F 测量精度 (SI: 1.71±0.03) → 用于"改善是否超过噪声"
 DF_NOISE_SIGMA = 0.03
 MIN_SAMPLE = 12  # 低于此判 insufficient_data
+EXTRAP_CAP = float(science_config()["DF_validation"]["extrapolation_cap"])  # 单一来源, 高于此标外推
 
 
 def _visible_frame(checkpoint: int, extra: list[int]) -> pd.DataFrame:
@@ -62,7 +63,7 @@ def get_campaign_state(checkpoint: int, extra_revealed: list[int] | None = None)
         "best_so_far_curve": curve,
         "feature_ranges_visible": ranges,
         "df_physical_range": [C.DF_MIN, C.DF_MAX],
-        "extrapolation_cap": 1.73,
+        "extrapolation_cap": EXTRAP_CAP,
     }
 
 
@@ -165,16 +166,14 @@ def compare_models(checkpoint: int, extra_revealed: list[int] | None = None) -> 
 # ---- 4. suggest_next_batch ----
 def _acquisition(mu: np.ndarray, std: np.ndarray, best: float, strategy: str) -> np.ndarray:
     std = np.maximum(std, 1e-9)
-    if strategy in ("gpr_mes", "ei"):  # Expected Improvement (离散池上的采集函数代理; 真 MES 留 M2)
+    if strategy == "gpr_mes":  # Expected Improvement (离散池上的采集函数代理; 真 MES 留 M2)
         z = (mu - best) / std
         return (mu - best) * norm.cdf(z) + std * norm.pdf(z)
     if strategy == "explore":
         return std
     if strategy == "exploit":
         return mu
-    if strategy == "rule_adaptive":  # 固定规则: 见 suggest_next_batch 调用处按 status 选
-        return mu  # 占位, 实际在外层替换
-    raise ValueError(f"unknown strategy {strategy}")
+    raise ValueError(f"unknown strategy {strategy}")  # pa_guided/rule_adaptive 在外层处理
 
 
 def suggest_next_batch(
@@ -195,17 +194,22 @@ def suggest_next_batch(
     eff_strategy = strategy
     rule_note = None
     if strategy == "rule_adaptive":
-        # 固定规则自适应: 停滞/不确定→偏探索(高不确定性); 健康→偏利用(高均值)
-        eff_strategy = "explore" if progress_status in ("plateau", "uncertain") else "exploit"
+        # 固定规则自适应 (§8 alternatives): healthy→利用(高均值); plateau→PA-guided 模型修复;
+        # uncertain→探索(高不确定性)。无状态/insufficient_data/未知 → 保守探索, 不退化为 exploit。
+        eff_strategy = {"healthy": "exploit", "plateau": "pa_guided",
+                        "uncertain": "explore"}.get(progress_status, "explore")
         rule_note = f"rule_adaptive: status={progress_status} → {eff_strategy}"
 
-    acq = _acquisition(mu, std, best, eff_strategy)
+    if eff_strategy == "pa_guided":
+        acq = M.pa_guided_acquisition(df_vis, X_cand)
+    else:
+        acq = _acquisition(mu, std, best, eff_strategy)
     order = np.argsort(acq)[::-1][:k]
 
     candidates = []
     for rank, idx in enumerate(order):
         e = hidden[idx]
-        extrap = bool(mu[idx] > 1.73)
+        extrap = bool(mu[idx] > EXTRAP_CAP)
         candidates.append({
             "rank": rank + 1,
             "candidate_id": e.exp_id,           # 标识符, 用于审批后揭示; 不含真实 y1

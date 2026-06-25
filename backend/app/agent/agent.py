@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import queue
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ from app.data import campaign as C
 from app.runtime import SESSION
 
 MAX_STEPS = 8
+MAX_EMPTY_RETRIES = 2     # 推理模型经代理偶发空补全(0 输出 token, 无 tool_call); 有界重试再兜底
 LLM_TOOL_OBS_LIMIT = 6000
 SYSTEM_PROMPT_HASH = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:16]
 
@@ -52,6 +54,7 @@ class AgentState(TypedDict):
     checkpoint: int
     extra_revealed: list[int]
     step_count: int
+    empty_streak: int          # 连续"无 tool_call"回合数, 用于有界重试空补全
     pending_decision: Optional[dict]
 
 
@@ -86,10 +89,14 @@ def get_llm() -> ChatOpenAI:
             s = LLMSettings()
             if not s.configured:
                 raise RuntimeError("LLM 未配置: 请在 .env 设置 OPENAI_BASE_URL / OPENAI_API_KEY")
-            _llm = ChatOpenAI(
-                base_url=s.base_url, api_key=s.api_key, model=s.model,
-                temperature=s.temperature, timeout=60, max_retries=2,
-            ).bind_tools(TOOL_SCHEMAS)
+            kwargs = dict(base_url=s.base_url, api_key=s.api_key, model=s.model,
+                          timeout=60, max_retries=2)
+            # 推理模型(claude / o 系)拒绝 temperature 参数 → 仅对支持的模型发送
+            # basename 归一(去 provider 前缀)+ 小写; o 系用 o\d 匹配 o1..o9
+            mid = s.model.split("/")[-1].lower()
+            if not (mid.startswith("claude") or re.match(r"o\d", mid)):
+                kwargs["temperature"] = s.temperature
+            _llm = ChatOpenAI(**kwargs).bind_tools(TOOL_SCHEMAS)
     return _llm
 
 
@@ -103,7 +110,9 @@ def _agent_node(state: AgentState) -> dict:
             "input": handle.token_usage.get("input", 0) + um.get("input_tokens", 0),
             "output": handle.token_usage.get("output", 0) + um.get("output_tokens", 0),
         }
-    return {"messages": [ai], "step_count": state["step_count"] + 1}
+    empty = not getattr(ai, "tool_calls", None)   # 无工具调用 = 空补全或纯文本(本设计须经工具结束)
+    return {"messages": [ai], "step_count": state["step_count"] + 1,
+            "empty_streak": state["empty_streak"] + 1 if empty else 0}
 
 
 def _normalize_card(args: dict, allowed_ids: list[int]) -> dict:
@@ -142,7 +151,18 @@ def _tools_node(state: AgentState) -> dict:
             out.append(ToolMessage(content="决策卡已记录", tool_call_id=tcid))
             continue
         handle.push({"type": "tool_call", "tool": name, "args": args})
-        result = dispatch(name, args, state["checkpoint"], state["extra_revealed"], handle.last_status)
+        # 幻觉/未知工具或工具内异常不得崩 run: 回纠正性观测让模型自纠 (claude 偶发自创工具名)
+        try:
+            result = dispatch(name, args, state["checkpoint"], state["extra_revealed"], handle.last_status)
+        except Exception as e:  # noqa: BLE001
+            valid = [s["function"]["name"] for s in TOOL_SCHEMAS]
+            err = {"tool": name, "error": f"{type(e).__name__}: {e}", "valid_tools": valid}
+            db.log_tool_run(state["run_id"], state["step_count"], name, args, err)
+            handle.push({"type": "tool_result", "tool": name, "result": err})
+            out.append(ToolMessage(
+                content=json.dumps({"error": err["error"], "请改用以下工具之一": valid}, ensure_ascii=False),
+                tool_call_id=tcid))
+            continue
         if name == "assess_progress":
             handle.last_status = result.get("status")
         if name == "suggest_next_batch":
@@ -160,9 +180,21 @@ def _tools_node(state: AgentState) -> dict:
     return {"messages": out, "pending_decision": decision}
 
 
+def _nudge_node(state: AgentState) -> dict:
+    """空/无工具回合后的纠正提示 (应对代理偶发空补全), 推回 agent 重试。"""
+    return {"messages": [HumanMessage(
+        "上一步未调用任何工具。请直接调用工具继续诊断, 并最终调用一次 emit_decision_card 结束。"
+    )]}
+
+
 def _route_agent(state: AgentState) -> str:
     last = state["messages"][-1]
-    return "tools" if getattr(last, "tool_calls", None) else END
+    if getattr(last, "tool_calls", None):
+        return "tools"
+    # 空补全/纯文本回合: 步数内有界重试, 超限才结束(交由零卡片兜底)
+    if state["empty_streak"] <= MAX_EMPTY_RETRIES and state["step_count"] < MAX_STEPS:
+        return "nudge"
+    return END
 
 
 def _route_tools(state: AgentState) -> str:
@@ -177,8 +209,10 @@ def build_graph():
     g = StateGraph(AgentState)
     g.add_node("agent", _agent_node)
     g.add_node("tools", _tools_node)
+    g.add_node("nudge", _nudge_node)
     g.add_edge(START, "agent")
-    g.add_conditional_edges("agent", _route_agent, {"tools": "tools", END: END})
+    g.add_conditional_edges("agent", _route_agent, {"tools": "tools", "nudge": "nudge", END: END})
+    g.add_edge("nudge", "agent")
     g.add_conditional_edges("tools", _route_tools, {"agent": "agent", END: END})
     return g.compile()
 
@@ -216,9 +250,9 @@ def start_run(user_goal: str) -> tuple[str, RunHandle]:
                 "messages": [SystemMessage(SYSTEM_PROMPT), HumanMessage(user_goal)],
                 "run_id": run_id, "campaign_id": SESSION.campaign_id,
                 "checkpoint": handle.checkpoint, "extra_revealed": handle.extra_revealed,
-                "step_count": 0, "pending_decision": None,
+                "step_count": 0, "empty_streak": 0, "pending_decision": None,
             }
-            final = GRAPH.invoke(inputs, config={"recursion_limit": 2 * MAX_STEPS + 2})
+            final = GRAPH.invoke(inputs, config={"recursion_limit": 3 * MAX_STEPS + 4})
             card = final.get("pending_decision")
             if card is None:  # 零卡片兜底, 保留审批门 (B4)
                 card = _fallback_card(handle)

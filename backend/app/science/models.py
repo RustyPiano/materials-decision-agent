@@ -184,3 +184,76 @@ def fit_gpr_predict(df_visible: pd.DataFrame, X_cand: pd.DataFrame) -> tuple[np.
     gpr.fit(scale_features(df_visible), df_visible["y1"].to_numpy(dtype=float))
     mu, std = gpr.predict(scale_features(X_cand), return_std=True)
     return mu, std
+
+
+# ---- SHAP importance + I score (Spec §5.2, M2) ----
+# 仅树模型 (§5.2 约束); 用 XGBoost 原生 TreeSHAP (pred_contribs/pred_interactions),
+# 无需额外 shap 依赖。I score = 主效应/交互效应比 (science_config: XGBoost_SHAP_interaction, 正文 Eq.2)。
+I_SCORE_MIN_N = 30      # ponytail: I score 仅在样本足时给确定结论 (§5.2); 原 notebook 用全量, 30 为保守门槛, 不够调高
+_SHAP_BOOT = 20         # 重要度稳定性 bootstrap 次数; 嫌慢调小
+
+
+def _xgb_shap(X: np.ndarray, y: np.ndarray, with_inter: bool) -> tuple:
+    import xgboost as xgb
+    model = make_xgboost()
+    model.fit(X, y)
+    booster = model.get_booster()
+    dm = xgb.DMatrix(X)
+    contribs = booster.predict(dm, pred_contribs=True)                       # (n, F+1) 末列=bias
+    inter = booster.predict(dm, pred_interactions=True) if with_inter else None  # (n, F+1, F+1)
+    return contribs, inter
+
+
+def shap_explain(df: pd.DataFrame) -> dict:
+    """XGBoost TreeSHAP 特征重要度 (mean|SHAP|, 带 bootstrap 稳定性) + I score。"""
+    F = len(FEATURES)
+    X = raw_features(df)
+    y = df["y1"].to_numpy(dtype=float)
+    n = len(y)
+
+    contribs, inter = _xgb_shap(X, y, with_inter=True)
+    importance = np.abs(contribs[:, :F]).mean(axis=0)
+
+    # 重要度稳定性: bootstrap 重采样, 报告 std (§5.2 稳定性不足不出确定结论)
+    rng = np.random.default_rng(0)
+    boots = np.empty((_SHAP_BOOT, F))
+    for b in range(_SHAP_BOOT):
+        idx = rng.integers(0, n, n)
+        c, _ = _xgb_shap(X[idx], y[idx], with_inter=False)
+        boots[b] = np.abs(c[:, :F]).mean(axis=0)
+    imp_std = boots.std(axis=0)
+
+    # I score: 主效应=|对角| 均值, 交互效应=Σ_{j≠i}|非对角| 均值 (per feature)
+    diag = inter[:, np.arange(F), np.arange(F)]                # (n, F)
+    main = np.abs(diag).mean(axis=0)
+    off = np.abs(inter[:, :F, :F]).sum(axis=2).mean(axis=0) - main
+    i_reliable = n >= I_SCORE_MIN_N
+
+    features = []
+    for j, f in enumerate(FEATURES):
+        features.append({
+            "feature": f,
+            "importance": round(float(importance[j]), 4),
+            "importance_std": round(float(imp_std[j]), 4),
+            "main_effect": round(float(main[j]), 4),
+            "interaction_effect": round(float(off[j]), 4),
+            # I>1 主效应主导(独立), I<1 交互主导; 样本不足(不可靠)时不给确定结论 → null (§5.2)
+            "i_score": None if (not i_reliable or off[j] < 1e-9) else round(float(main[j] / off[j]), 3),
+        })
+    features.sort(key=lambda r: r["importance"], reverse=True)
+    return {
+        "tool": "shap_explain", "model": "XGBoost", "n": n,
+        "features": features,
+        "i_score_reliable": i_reliable,
+        "i_score_note": "" if i_reliable else f"样本 n={n}<{I_SCORE_MIN_N}, I score 不稳定, 仅供参考 (§5.2)",
+        "note": "TreeSHAP 关联度量, 非因果机制; 仅 XGBoost 计算 (§5.2)",
+    }
+
+
+def pa_guided_acquisition(df_visible: pd.DataFrame, X_cand: pd.DataFrame, top_blind: int = 5) -> np.ndarray:
+    """PA-guided 补点采集: 候选离高 PA 盲区点越近分越高 (域归一距离)。"""
+    blind = pointwise_pa_score(df_visible)[:top_blind]
+    Xb = scale_features(pd.DataFrame([{f: b[f] for f in FEATURES} for b in blind]))
+    Xc = scale_features(X_cand)
+    dist = np.min(np.linalg.norm(Xc[:, None, :] - Xb[None, :, :], axis=2), axis=1)
+    return -dist

@@ -64,6 +64,31 @@ def models_compare() -> dict:
     return T.compare_models(SESSION.checkpoint, list(SESSION.extra_revealed))
 
 
+@app.get("/api/models/explain")
+def models_explain() -> dict:
+    """SHAP importance + I score (§5.2, M2)。仅当前可见数据。"""
+    from app.science import models as M
+    from app.science import tools as TT
+    df = TT._visible_frame(SESSION.checkpoint, list(SESSION.extra_revealed))
+    return M.shap_explain(df)
+
+
+@app.get("/api/models/blindspots")
+def models_blindspots() -> dict:
+    """PA-guided 盲区视图: 全部可见点的逐点 PA score + top 盲区 (§5.2/§6.4, M2)。"""
+    from app.science import models as M
+    from app.science import tools as TT
+    df = TT._visible_frame(SESSION.checkpoint, list(SESSION.extra_revealed))
+    pa = M.pointwise_pa_score(df)          # 已按 pa_score 降序
+    return {
+        "checkpoint": SESSION.checkpoint, "n": len(pa),
+        "metric": "PA score = 逐点 CV-MSE (越高=模型越难预测=盲区)",
+        "points": pa,                       # 全部可见点 (含 pa_score), 供散点上色
+        "top_blindspots": pa[:8],
+        "note": "高 PA 区 = PA-guided 补点目标; 补点策略见 suggest_next_batch(strategy=pa_guided)",
+    }
+
+
 # ---- Agent ----
 class RunReq(BaseModel):
     user_goal: str = "诊断当前实验进展, 并在合适时给出下一批实验建议。"

@@ -30,8 +30,8 @@ TOOL_SCHEMAS = [
         "name": "suggest_next_batch",
         "description": "在隐藏历史候选池(全部剩余真实点)中生成一批建议点。仅返回模型预测, 不含真实 D_F。",
         "parameters": {"type": "object", "properties": {
-            "strategy": {"type": "string", "enum": ["gpr_mes", "rule_adaptive", "explore", "exploit"],
-                          "description": "采样策略: gpr_mes(期望改善基线) / rule_adaptive(按进展状态的固定规则) / explore(高不确定性) / exploit(高预测均值)"},
+            "strategy": {"type": "string", "enum": ["gpr_mes", "rule_adaptive", "explore", "exploit", "pa_guided"],
+                          "description": "采样策略: gpr_mes(期望改善基线) / rule_adaptive(按进展状态的固定规则) / explore(高不确定性) / exploit(高预测均值) / pa_guided(向模型盲区补点修复)"},
             "k": {"type": "integer", "description": "建议点数, 默认3", "minimum": 1, "maximum": 10},
         }, "required": ["strategy"]},
     }},

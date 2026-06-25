@@ -60,19 +60,24 @@ def _now() -> float:
     return time.time()
 
 
-# ---- 会话游标持久化 (§11.10) ----
-def save_session_state(checkpoint: int, extra_revealed: list[int]) -> None:
+def _write(sql: str, params: tuple) -> None:
+    """单条写入: connect → execute → commit → close。"""
     conn = connect()
     try:
-        conn.execute(
-            "INSERT INTO session_state (id, checkpoint, extra_revealed, updated_at) VALUES (1,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET checkpoint=excluded.checkpoint, "
-            "extra_revealed=excluded.extra_revealed, updated_at=excluded.updated_at",
-            (checkpoint, json.dumps(extra_revealed), _now()),
-        )
+        conn.execute(sql, params)
         conn.commit()
     finally:
         conn.close()
+
+
+# ---- 会话游标持久化 (§11.10) ----
+def save_session_state(checkpoint: int, extra_revealed: list[int]) -> None:
+    _write(
+        "INSERT INTO session_state (id, checkpoint, extra_revealed, updated_at) VALUES (1,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET checkpoint=excluded.checkpoint, "
+        "extra_revealed=excluded.extra_revealed, updated_at=excluded.updated_at",
+        (checkpoint, json.dumps(extra_revealed), _now()),
+    )
 
 
 def load_session_state() -> tuple[int, list[int]] | None:
@@ -89,63 +94,38 @@ def load_session_state() -> tuple[int, list[int]] | None:
 # ---- 审计日志 (追加写入) ----
 def log_agent_run(run_id: str, campaign_id: str, checkpoint: int, user_goal: str,
                   provider: str, model: str, sph: str, tool_version: str) -> None:
-    conn = connect()
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO agent_run VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, campaign_id, checkpoint, user_goal, "running", provider, model,
-             sph, tool_version, "{}", _now()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _write(
+        "INSERT OR REPLACE INTO agent_run VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, campaign_id, checkpoint, user_goal, "running", provider, model,
+         sph, tool_version, "{}", _now()),
+    )
 
 
 def update_agent_run(run_id: str, status: str, token_usage: dict | None = None) -> None:
-    conn = connect()
-    try:
-        conn.execute(
-            "UPDATE agent_run SET status=?, token_usage=? WHERE run_id=?",
-            (status, json.dumps(token_usage or {}), run_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _write(
+        "UPDATE agent_run SET status=?, token_usage=? WHERE run_id=?",
+        (status, json.dumps(token_usage or {}), run_id),
+    )
 
 
 def log_tool_run(run_id: str, seq: int, tool: str, args: dict, result: dict) -> None:
-    conn = connect()
-    try:
-        conn.execute(
-            "INSERT INTO tool_run (run_id, seq, tool, args, result, created_at) VALUES (?,?,?,?,?,?)",
-            (run_id, seq, tool, json.dumps(args, ensure_ascii=False),
-             json.dumps(result, ensure_ascii=False, default=str), _now()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _write(
+        "INSERT INTO tool_run (run_id, seq, tool, args, result, created_at) VALUES (?,?,?,?,?,?)",
+        (run_id, seq, tool, json.dumps(args, ensure_ascii=False),
+         json.dumps(result, ensure_ascii=False, default=str), _now()),
+    )
 
 
 def log_decision(run_id: str, card: dict) -> None:
-    conn = connect()
-    try:
-        conn.execute(
-            "INSERT INTO decision (run_id, card, created_at) VALUES (?,?,?)",
-            (run_id, json.dumps(card, ensure_ascii=False), _now()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _write(
+        "INSERT INTO decision (run_id, card, created_at) VALUES (?,?,?)",
+        (run_id, json.dumps(card, ensure_ascii=False), _now()),
+    )
 
 
 def log_approval(run_id: str, action: str, detail: dict, revealed_ids: list[int]) -> None:
-    conn = connect()
-    try:
-        conn.execute(
-            "INSERT INTO approval (run_id, action, detail, revealed_ids, created_at) VALUES (?,?,?,?,?)",
-            (run_id, action, json.dumps(detail, ensure_ascii=False),
-             json.dumps(revealed_ids), _now()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _write(
+        "INSERT INTO approval (run_id, action, detail, revealed_ids, created_at) VALUES (?,?,?,?,?)",
+        (run_id, action, json.dumps(detail, ensure_ascii=False),
+         json.dumps(revealed_ids), _now()),
+    )

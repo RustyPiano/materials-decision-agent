@@ -39,7 +39,7 @@ export default function App() {
       <header className="topbar">
         <div>
           <div className="title">ReSe₂ 枝晶实验决策 <span>Agent</span> 可视化系统</div>
-          <div className="sub">{state.campaign_id} · 历史重放 + 受控 LLM 工具调用闭环 (v0.2 / M1)</div>
+          <div className="sub">{state.campaign_id} · 历史重放 + 受控 LLM 工具调用闭环 (v0.2 / M2)</div>
         </div>
         <div className="kpis">
           <div className="kpi"><div className="v">{state.checkpoint}</div><div className="l">当前轮次</div></div>

@@ -54,11 +54,29 @@ cd frontend && npm install && npm run dev
 Codex(xhigh) + Opus(xhigh) 并行审核, P0/P1/P2 全部已修并端到端验证。
 完整归并与修复状态见 [docs/REVIEW_M1.md](docs/REVIEW_M1.md)。
 
-## 已知限制 / M2 待办
+## M2：透明性补充 (Spec §12)
 
-- GPR+MES baseline 用离散候选池上的期望改善(EI)代理, 真 emukit MES / GPy 留 M2。
-- 阶段2 扩点(PA-guided)、SHAP importance、I score 页面、规则型自适应 baseline、自动评测脚本 (Spec §10/§12)。
-- 多场景固定测试 (停滞/不可区分/越权泄漏) 脚本化。
+| 项 | 状态 |
+|---|---|
+| SHAP importance | ✅ XGBoost 原生 TreeSHAP (`pred_contribs`, 无新依赖) + bootstrap 稳定性, Model 区 |
+| I score | ✅ 主效应/交互效应比 (SHAP interaction), 样本 n<30 标"仅供参考" (§5.2) |
+| PA-guided 盲区视图 | ✅ 逐点 PA score 散点 (`/api/models/blindspots`) + `suggest_next_batch(strategy=pa_guided)` 补点 |
+| 规则型自适应 baseline | ✅ `rule_adaptive`: plateau→pa_guided / uncertain→explore / healthy→exploit (§8) |
+| 自动评测脚本 | ✅ `backend/eval/run_eval.py` (§10): baseline 轨迹对比 + 泄漏审计 + (可选)Agent 场景 |
+
+新增页面分析接口 (只读, 非 Agent 工具循环)：`GET /api/models/explain`、`GET /api/models/blindspots`。
+
+```bash
+# 自动评测 (backend 目录)
+.venv/bin/python -m eval.run_eval            # 确定性 baseline 对比 + 泄漏审计 (§10.2/§10.4.3)
+.venv/bin/python -m eval.run_eval --agent    # 追加 LLM Agent 行为场景 (需 .env, 慢)
+# 报告写入 data/processed/eval_report.json
+```
+
+## 已知限制
+
+- GPR+MES baseline 用离散候选池上的期望改善(EI)代理 MES; 真 emukit/GPy MES 因重依赖暂不引入 (离散池上 EI 已是合理代理)。
+- `--agent` 评测场景非确定性、消耗 LLM token; 证据"是否充分"留人工复核 (§10.3)。
 - (P3 打磨) 图表坐标轴动态域、内联样式收敛到 CSS 变量。
 
 详见 [docs/M0_AUDIT.md](docs/M0_AUDIT.md) 与 [docs/REVIEW_M1.md](docs/REVIEW_M1.md)。
